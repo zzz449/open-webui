@@ -395,7 +395,7 @@ async def get_ollama_tags(
             )
 
     if user.role == "user" and not BYPASS_MODEL_ACCESS_CONTROL:
-        models["models"] = get_filtered_models(models, user)
+        models["models"] = await get_filtered_models(models, user)
 
     return models
 
@@ -939,6 +939,7 @@ async def generate_completion(
 class ChatMessage(BaseModel):
     role: str
     content: str
+    tool_calls: Optional[list[dict]] = None
     images: Optional[list[str]] = None
 
 
@@ -950,6 +951,7 @@ class GenerateChatCompletionForm(BaseModel):
     template: Optional[str] = None
     stream: Optional[bool] = True
     keep_alive: Optional[Union[int, str]] = None
+    tools: Optional[list[dict]] = None
 
 
 async def get_ollama_url(request: Request, model: str, url_idx: Optional[int] = None):
@@ -962,7 +964,7 @@ async def get_ollama_url(request: Request, model: str, url_idx: Optional[int] = 
             )
         url_idx = random.choice(models[model].get("urls", []))
     url = request.app.state.config.OLLAMA_BASE_URLS[url_idx]
-    return url
+    return url, url_idx
 
 
 @router.post("/api/chat")
@@ -977,6 +979,7 @@ async def generate_chat_completion(
     if BYPASS_MODEL_ACCESS_CONTROL:
         bypass_filter = True
 
+    metadata = form_data.pop("metadata", None)
     try:
         form_data = GenerateChatCompletionForm(**form_data)
     except Exception as e:
@@ -987,8 +990,6 @@ async def generate_chat_completion(
         )
 
     payload = {**form_data.model_dump(exclude_none=True)}
-    if "metadata" in payload:
-        del payload["metadata"]
 
     model_id = payload["model"]
     model_info = Models.get_model_by_id(model_id)
@@ -1006,7 +1007,7 @@ async def generate_chat_completion(
             payload["options"] = apply_model_params_to_body_ollama(
                 params, payload["options"]
             )
-            payload = apply_model_system_prompt_to_body(params, payload, user)
+            payload = apply_model_system_prompt_to_body(params, payload, metadata, user)
 
         # Check if user has access to the model
         if not bypass_filter and user.role == "user":
@@ -1030,7 +1031,7 @@ async def generate_chat_completion(
     if ":" not in payload["model"]:
         payload["model"] = f"{payload['model']}:latest"
 
-    url = await get_ollama_url(request, payload["model"], url_idx)
+    url, url_idx = await get_ollama_url(request, payload["model"], url_idx)
     api_config = request.app.state.config.OLLAMA_API_CONFIGS.get(
         str(url_idx),
         request.app.state.config.OLLAMA_API_CONFIGS.get(url, {}),  # Legacy support
@@ -1132,7 +1133,7 @@ async def generate_openai_completion(
     if ":" not in payload["model"]:
         payload["model"] = f"{payload['model']}:latest"
 
-    url = await get_ollama_url(request, payload["model"], url_idx)
+    url, url_idx = await get_ollama_url(request, payload["model"], url_idx)
     api_config = request.app.state.config.OLLAMA_API_CONFIGS.get(
         str(url_idx),
         request.app.state.config.OLLAMA_API_CONFIGS.get(url, {}),  # Legacy support
@@ -1159,6 +1160,8 @@ async def generate_openai_chat_completion(
     url_idx: Optional[int] = None,
     user=Depends(get_verified_user),
 ):
+    metadata = form_data.pop("metadata", None)
+
     try:
         completion_form = OpenAIChatCompletionForm(**form_data)
     except Exception as e:
@@ -1185,7 +1188,7 @@ async def generate_openai_chat_completion(
 
         if params:
             payload = apply_model_params_to_body_openai(params, payload)
-            payload = apply_model_system_prompt_to_body(params, payload, user)
+            payload = apply_model_system_prompt_to_body(params, payload, metadata, user)
 
         # Check if user has access to the model
         if user.role == "user":
@@ -1209,7 +1212,7 @@ async def generate_openai_chat_completion(
     if ":" not in payload["model"]:
         payload["model"] = f"{payload['model']}:latest"
 
-    url = await get_ollama_url(request, payload["model"], url_idx)
+    url, url_idx = await get_ollama_url(request, payload["model"], url_idx)
     api_config = request.app.state.config.OLLAMA_API_CONFIGS.get(
         str(url_idx),
         request.app.state.config.OLLAMA_API_CONFIGS.get(url, {}),  # Legacy support
